@@ -1,22 +1,18 @@
 import os
 import re
 import httpx
+import psycopg
 from datetime import datetime
-from supabase import create_client
 
-# ---------- CONEXIÓN A SUPABASE ----------
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+# ---------- CONEXIÓN A POSTGRES ----------
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise SystemExit("❌ Faltan SUPABASE_URL o SUPABASE_KEY en las variables de entorno.")
-
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+if not DATABASE_URL:
+    raise SystemExit("❌ Falta DATABASE_URL en las variables de entorno.")
 
 
 # ---------- FUNCIONES AUXILIARES ----------
 def limpiar_html(html: str) -> str:
-    """Quita las etiquetas HTML de la descripción."""
     if not html:
         return ""
     texto = re.sub(r"<[^>]+>", " ", html)
@@ -24,17 +20,7 @@ def limpiar_html(html: str) -> str:
     return texto.strip()[:5000]
 
 
-def detectar_modalidad(texto: str) -> str:
-    t = (texto or "").lower()
-    if "remote" in t or "remoto" in t:
-        return "remoto"
-    if "hybrid" in t or "hibrido" in t:
-        return "hibrido"
-    return "presencial"
-
-
 def extraer_tags(titulo: str, descripcion: str) -> list[str]:
-    """Busca tecnologías conocidas en el título y la descripción."""
     catalogo = [
         "react", "node", "python", "django", "java", "aws", "docker",
         "kubernetes", "typescript", "vue", "angular", "php", "laravel",
@@ -104,7 +90,6 @@ def scrape_remoteok() -> list[dict]:
         return []
 
     trabajos = []
-    # El primer elemento del array es un aviso legal, no un trabajo
     for j in data[1:]:
         descripcion = limpiar_html(j.get("description", ""))
         tags = j.get("tags", []) or []
@@ -130,13 +115,13 @@ def scrape_remoteok() -> list[dict]:
     return trabajos
 
 
-# ---------- GUARDAR EN SUPABASE ----------
+# ---------- GUARDAR EN POSTGRES ----------
 def guardar_trabajos(trabajos: list[dict]):
     if not trabajos:
         print("⚠️  No hay trabajos para guardar.")
         return
 
-    # Quitamos duplicados internos (mismo source+external_id) antes de subir
+    # Quitar duplicados internos por (source, external_id)
     vistos = set()
     unicos = []
     for t in trabajos:
@@ -145,13 +130,47 @@ def guardar_trabajos(trabajos: list[dict]):
             vistos.add(clave)
             unicos.append(t)
 
-    # upsert = insertar o actualizar si ya existe
-    resultado = supabase.table("jobs").upsert(
-        unicos,
-        on_conflict="source,external_id",
-    ).execute()
+    sql = """
+        insert into jobs (
+            external_id, source, titulo, empresa, descripcion,
+            modalidad, ubicacion, pais, categoria, tags,
+            salario_texto, tipo_contrato, url_origen, logo_url, publicado_en
+        )
+        values (
+            %(external_id)s, %(source)s, %(titulo)s, %(empresa)s, %(descripcion)s,
+            %(modalidad)s, %(ubicacion)s, %(pais)s, %(categoria)s, %(tags)s,
+            %(salario_texto)s, %(tipo_contrato)s, %(url_origen)s, %(logo_url)s, %(publicado_en)s
+        )
+        on conflict (source, external_id) do update set
+            titulo = excluded.titulo,
+            empresa = excluded.empresa,
+            descripcion = excluded.descripcion,
+            modalidad = excluded.modalidad,
+            ubicacion = excluded.ubicacion,
+            pais = excluded.pais,
+            categoria = excluded.categoria,
+            tags = excluded.tags,
+            salario_texto = excluded.salario_texto,
+            tipo_contrato = excluded.tipo_contrato,
+            url_origen = excluded.url_origen,
+            logo_url = excluded.logo_url,
+            publicado_en = excluded.publicado_en,
+            scrapeado_en = now(),
+            activo = true
+    """
 
-    print(f"💾 {len(resultado.data)} trabajos guardados/actualizados en Supabase.")
+    # Normalizar publicado_en: quitar None y strings vacíos
+    for t in unicos:
+        if not t.get("publicado_en"):
+            t["publicado_en"] = None
+
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.cursor() as cur:
+            for t in unicos:
+                cur.execute(sql, t)
+        conn.commit()
+
+    print(f"💾 {len(unicos)} trabajos guardados/actualizados en Postgres.")
 
 
 # ---------- MAIN ----------
