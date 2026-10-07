@@ -21,6 +21,15 @@ jobs:
       - name: Instalar dependencias
         run: pip install -r scraper/requirements.txt
 
+      - name: Test conectividad
+        run: |
+          echo "=== Remotive ==="
+          curl -sS -o /dev/null -w "HTTP %{http_code}\n" "https://remotive.com/api/remote-jobs?limit=1" || echo "FALLÓ"
+          echo "=== RemoteOK ==="
+          curl -sS -o /dev/null -w "HTTP %{http_code}\n" "https://remoteok.com/api" || echo "FALLÓ"
+          echo "=== Supabase ==="
+          curl -sS -o /dev/null -w "HTTP %{http_code}\n" "${{ secrets.SUPABASE_URL }}/rest/v1/" || echo "FALLÓ"
+
       - name: Ejecutar el scraper
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
